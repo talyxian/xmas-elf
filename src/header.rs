@@ -1,7 +1,7 @@
 use core::fmt;
 use core::mem;
 
-use {P32, P64, ElfFile};
+use {P32Le, P64Le, P32Be, P64Be, Primitive, Native, ToNative, ElfFile};
 use zero::{read, Pod};
 
 
@@ -10,18 +10,29 @@ pub fn parse_header<'a>(input: &'a [u8]) -> Header<'a> {
     let header_1: &'a HeaderPt1 = read(&input[..size_pt1]);
     assert!(header_1.magic == MAGIC);
 
-    let header_2 = match header_1.class() {
-        Class::None | Class::Other(_) => Err("Invalid ELF class"),
-        Class::ThirtyTwo => {
-            let header_2: &'a HeaderPt2_<P32> =
-                read(&input[size_pt1..size_pt1 + mem::size_of::<HeaderPt2_<P32>>()]);
-            Ok(HeaderPt2::Header32(header_2))
+    let header_2 = match (header_1.class(), header_1.data()) {
+        (Class::ThirtyTwo, Data::LittleEndian) => {
+            let header_2: &'a HeaderPt2_<P32Le> =
+                read(&input[size_pt1..size_pt1 + mem::size_of::<HeaderPt2_<P32Le>>()]);
+            Ok(HeaderPt2::Header32Le(header_2))
         }
-        Class::SixtyFour => {
-            let header_2: &'a HeaderPt2_<P64> =
-                read(&input[size_pt1..size_pt1 + mem::size_of::<HeaderPt2_<P64>>()]);
-            Ok(HeaderPt2::Header64(header_2))
+        (Class::ThirtyTwo, Data::BigEndian) => {
+            let header_2: &'a HeaderPt2_<P32Be> =
+                read(&input[size_pt1..size_pt1 + mem::size_of::<HeaderPt2_<P32Be>>()]);
+            Ok(HeaderPt2::Header32Be(header_2))
         }
+        (Class::SixtyFour, Data::LittleEndian) => {
+            let header_2: &'a HeaderPt2_<P64Le> =
+                read(&input[size_pt1..size_pt1 + mem::size_of::<HeaderPt2_<P64Le>>()]);
+            Ok(HeaderPt2::Header64Le(header_2))
+        }
+        (Class::SixtyFour, Data::BigEndian) => {
+            let header_2: &'a HeaderPt2_<P64Be> =
+                read(&input[size_pt1..size_pt1 + mem::size_of::<HeaderPt2_<P64Be>>()]);
+            Ok(HeaderPt2::Header64Be(header_2))
+        }
+        (Class::None, _) | (Class::Other(_), _) => Err("Invalid ELF class"),
+        (_, Data::None) | (_, Data::Other(_)) => Err("Invalid ELF datatype"),
     };
     Header {
         pt1: header_1,
@@ -89,16 +100,20 @@ impl HeaderPt1 {
 
 #[derive(Clone, Copy)]
 pub enum HeaderPt2<'a> {
-    Header32(&'a HeaderPt2_<P32>),
-    Header64(&'a HeaderPt2_<P64>),
+    Header32Le(&'a HeaderPt2_<P32Le>),
+    Header32Be(&'a HeaderPt2_<P32Be>),
+    Header64Le(&'a HeaderPt2_<P64Le>),
+    Header64Be(&'a HeaderPt2_<P64Be>),
 }
 
 macro_rules! getter {
     ($name: ident, $typ: ident) => {
         pub fn $name(&self) -> $typ {
             match *self {
-                HeaderPt2::Header32(h) => h.$name as $typ,
-                HeaderPt2::Header64(h) => h.$name as $typ,
+                HeaderPt2::Header32Le(h) => (h.$name.to_native()) as $typ,
+                HeaderPt2::Header32Be(h) => (h.$name.to_native()) as $typ,
+                HeaderPt2::Header64Le(h) => (h.$name.to_native()) as $typ,
+                HeaderPt2::Header64Be(h) => (h.$name.to_native()) as $typ,
             }
         }
     }
@@ -107,13 +122,15 @@ macro_rules! getter {
 impl<'a> HeaderPt2<'a> {
     pub fn size(&self) -> usize {
         match *self {
-            HeaderPt2::Header32(_) => mem::size_of::<HeaderPt2_<P32>>(),
-            HeaderPt2::Header64(_) => mem::size_of::<HeaderPt2_<P64>>(),
+            HeaderPt2::Header32Le(_) => mem::size_of::<HeaderPt2_<P32Le>>(),
+            HeaderPt2::Header32Be(_) => mem::size_of::<HeaderPt2_<P32Be>>(),
+            HeaderPt2::Header64Le(_) => mem::size_of::<HeaderPt2_<P64Le>>(),
+            HeaderPt2::Header64Be(_) => mem::size_of::<HeaderPt2_<P64Be>>(),
         }
     }
 
     // TODO move to impl Header
-    getter!(type_, Type_);
+    getter!(type_,  Type_);
     getter!(machine, Machine_);
     getter!(version, u32);
     getter!(header_size, u16);
@@ -130,33 +147,35 @@ impl<'a> HeaderPt2<'a> {
 impl<'a> fmt::Display for HeaderPt2<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            HeaderPt2::Header32(h) => write!(f, "{}", h),
-            HeaderPt2::Header64(h) => write!(f, "{}", h),
+            HeaderPt2::Header32Le(h) => write!(f, "{}", h),
+            HeaderPt2::Header32Be(h) => write!(f, "{}", h),
+            HeaderPt2::Header64Le(h) => write!(f, "{}", h),
+            HeaderPt2::Header64Be(h) => write!(f, "{}", h),
         }
     }
 }
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct HeaderPt2_<P> {
-    pub type_: Type_,
-    pub machine: Machine_,
-    pub version: u32,
-    pub entry_point: P,
-    pub ph_offset: P,
-    pub sh_offset: P,
-    pub flags: u32,
-    pub header_size: u16,
-    pub ph_entry_size: u16,
-    pub ph_count: u16,
-    pub sh_entry_size: u16,
-    pub sh_count: u16,
-    pub sh_str_index: u16,
+pub struct HeaderPt2_<P: Primitive> {
+    pub type_: Type_<P>,
+    pub machine: Machine_<P>,
+    pub version: P::u32,
+    pub entry_point: P::P,
+    pub ph_offset: P::P,
+    pub sh_offset: P::P,
+    pub flags: P::u32,
+    pub header_size: P::u16,
+    pub ph_entry_size: P::u16,
+    pub ph_count: P::u16,
+    pub sh_entry_size: P::u16,
+    pub sh_count: P::u16,
+    pub sh_str_index: P::u16,
 }
 
-unsafe impl<P> Pod for HeaderPt2_<P> {}
+unsafe impl<P: Primitive> Pod for HeaderPt2_<P> {}
 
-impl<P: fmt::Display> fmt::Display for HeaderPt2_<P> {
+impl<P: Primitive> fmt::Display for HeaderPt2_<P> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         try!(writeln!(f, "    type:             {:?}", self.type_));
         try!(writeln!(f, "    machine:          {:?}", self.machine));
@@ -343,11 +362,11 @@ pub enum OsAbi {
 }
 
 #[derive(Clone, Copy)]
-pub struct Type_(pub u16);
+pub struct Type_<P: Primitive = Native>(pub P::u16);
 
-impl Type_ {
-    pub fn as_type(self) -> Type {
-        match self.0 {
+impl<P: Primitive> Type_<P> {
+    pub fn as_type(&self) -> Type {
+        match self.0.to_native() as u16 {
             0 => Type::None,
             1 => Type::Relocatable,
             2 => Type::Executable,
@@ -358,7 +377,14 @@ impl Type_ {
     }
 }
 
-impl fmt::Debug for Type_ {
+impl<P: Primitive> ToNative for Type_<P> {
+    type Native = Type_<Native>;
+    fn to_native(&self) -> Self::Native {
+        Type_(self.0.to_native())
+    }
+}
+
+impl<P: Primitive> fmt::Debug for Type_<P> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.as_type().fmt(f)
     }
@@ -375,11 +401,11 @@ pub enum Type {
 }
 
 #[derive(Clone, Copy)]
-pub struct Machine_(u16);
+pub struct Machine_<P: Primitive = Native>(P::u16);
 
-impl Machine_ {
-    pub fn as_machine(self) -> Machine {
-        match self.0 {
+impl<P: Primitive> Machine_<P> {
+    pub fn as_machine(&self) -> Machine {
+        match self.0.to_native() {
             0x00 => Machine::None,
             0x02 => Machine::Sparc,
             0x03 => Machine::X86,
@@ -395,7 +421,15 @@ impl Machine_ {
     }
 }
 
-impl fmt::Debug for Machine_ {
+
+impl<P: Primitive> ToNative for Machine_<P> {
+    type Native = Machine_<Native>;
+    fn to_native(&self) -> Self::Native {
+        Machine_(self.0.to_native())
+    }
+}
+
+impl<P: Primitive> fmt::Debug for Machine_<P> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.as_machine().fmt(f)
     }
@@ -427,15 +461,17 @@ pub fn sanity_check(file: &ElfFile) -> Result<(), &'static str> {
            "header_size does not match size of header");
     match (&file.header.pt1.class(), &file.header.pt2) {
         (&Class::None, _) => return Err("No class"),
-        (&Class::ThirtyTwo, &Ok(HeaderPt2::Header32(_))) |
-        (&Class::SixtyFour, &Ok(HeaderPt2::Header64(_))) => {}
+        (&Class::ThirtyTwo, &Ok(HeaderPt2::Header32Le(_))) | 
+        (&Class::ThirtyTwo, &Ok(HeaderPt2::Header32Be(_))) | 
+        (&Class::SixtyFour, &Ok(HeaderPt2::Header64Le(_))) | 
+        (&Class::SixtyFour, &Ok(HeaderPt2::Header64Be(_))) => {}
         _ => return Err("Mismatch between specified and actual class"),
     }
     check!(!file.header.pt1.version.is_none(), "no version");
     check!(!file.header.pt1.data.is_none(), "no data format");
 
-    check!(pt2.entry_point() < file.input.len() as u64,
-           "entry point out of range");
+    //check!(pt2.entry_point() < file.input.len() as u64,
+    //       "entry point out of range");
     check!(pt2.ph_offset() + (pt2.ph_entry_size() as u64) * (pt2.ph_count() as u64) <=
            file.input.len() as u64,
            "program header table out of range");

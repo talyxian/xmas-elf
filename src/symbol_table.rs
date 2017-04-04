@@ -1,5 +1,5 @@
-use ElfFile;
 use sections;
+use {ToNative, Primitive, ElfFile};
 
 use zero::Pod;
 
@@ -8,50 +8,50 @@ use core::mem;
 
 #[derive(Debug)]
 #[repr(C)]
-struct Entry32_ {
-    name: u32,
-    value: u32,
-    size: u32,
+struct Entry32_<P: Primitive> {
+    name: P::u32,
+    value: P::u32,
+    size: P::u32,
     info: u8,
     other: Visibility_,
-    shndx: u16,
+    shndx: P::u16,
 }
 
 #[derive(Debug)]
 #[repr(C)]
-struct Entry64_ {
-    name: u32,
+struct Entry64_<P: Primitive> {
+    name: P::u32,
     info: u8,
     other: Visibility_,
-    shndx: u16,
-    value: u64,
-    size: u64,
+    shndx: P::u16,
+    value: P::u64,
+    size: P::u64,
 }
 
-unsafe impl Pod for Entry32_ {}
-unsafe impl Pod for Entry64_ {}
+unsafe impl<P: Primitive> Pod for Entry32_<P> {}
+unsafe impl<P: Primitive> Pod for Entry64_<P> {}
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct Entry32(Entry32_);
+pub struct Entry32<P: Primitive>(Entry32_<P>);
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct Entry64(Entry64_);
+pub struct Entry64<P: Primitive>(Entry64_<P>);
 
-unsafe impl Pod for Entry32 {}
-unsafe impl Pod for Entry64 {}
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct DynEntry32(Entry32_);
+unsafe impl<P: Primitive> Pod for Entry32<P> {}
+unsafe impl<P: Primitive> Pod for Entry64<P> {}
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct DynEntry64(Entry64_);
+pub struct DynEntry32<P: Primitive>(Entry32_<P>);
 
-unsafe impl Pod for DynEntry32 {}
-unsafe impl Pod for DynEntry64 {}
+#[derive(Debug)]
+#[repr(C)]
+pub struct DynEntry64<P: Primitive>(Entry64_<P>);
+
+unsafe impl<P: Primitive> Pod for DynEntry32<P> {}
+unsafe impl<P: Primitive> Pod for DynEntry64<P> {}
 
 pub trait Entry {
     fn name(&self) -> u32;
@@ -123,17 +123,17 @@ impl fmt::Display for Entry {
 
 macro_rules! impl_entry {
     ($name: ident with ElfFile::$strfunc: ident) => {
-        impl Entry for $name {
+        impl<P: Primitive> Entry for $name<P> {
             fn get_name<'a>(&'a self, elf_file: &ElfFile<'a>) -> Result<&'a str, &'static str> {
                 elf_file.$strfunc(self.name())
             }
 
-            fn name(&self) -> u32 { self.0.name }
-            fn info(&self) -> u8 { self.0.info }
+            fn name(&self) -> u32 { self.0.name.to_native() }
+            fn info(&self) -> u8 { self.0.info.to_native() }
             fn other(&self) -> Visibility_ { self.0.other }
-            fn shndx(&self) -> u16 { self.0.shndx }
-            fn value(&self) -> u64 { self.0.value as u64 }
-            fn size(&self) -> u64 { self.0.size as u64 }
+            fn shndx(&self) -> u16 { self.0.shndx.to_native() }
+            fn value(&self) -> u64 { self.0.value.to_native() as u64 }
+            fn size(&self) -> u64 { self.0.size.to_native() as u64 }
         }
     }
 }

@@ -22,15 +22,13 @@ pub mod program;
 pub mod symbol_table;
 pub mod dynamic;
 pub mod hash;
+pub mod primitive;
 
 use header::Header;
 use sections::{SectionHeader, SectionIter};
 use program::{ProgramHeader, ProgramIter};
 use zero::{read, read_str};
-use symbol_table::Entry;
-
-pub type P32 = u32;
-pub type P64 = u64;
+use primitive::*;
 
 pub struct ElfFile<'a> {
     pub input: &'a [u8],
@@ -170,8 +168,8 @@ mod test {
     fn mk_elf_header(class: u8) -> Vec<u8> {
         let header_size = mem::size_of::<HeaderPt1>() +
                           match class {
-            1 => mem::size_of::<HeaderPt2_<P32>>(),
-            2 => mem::size_of::<HeaderPt2_<P64>>(),
+            1 => mem::size_of::<HeaderPt2_<P32Le>>(),
+            2 => mem::size_of::<HeaderPt2_<P64Le>>(),
             _ => 0,
         };
         let mut header = vec![0x7f, 'E' as u8, 'L' as u8, 'F' as u8];

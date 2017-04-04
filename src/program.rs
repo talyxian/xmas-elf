@@ -1,6 +1,6 @@
-use {ElfFile, P32, P64};
+use {ElfFile, P32Le, P64Le, P32Be, P64Be, Primitive, ToNative};
 use zero::{read, read_array, Pod};
-use header::{Class, Header};
+use header::{Class, Header, Data};
 use dynamic::Dynamic;
 use sections::NoteHeader;
 
@@ -17,16 +17,24 @@ pub fn parse_program_header<'a>(input: &'a [u8],
     let start = pt2.ph_offset() as usize + index as usize * pt2.ph_entry_size() as usize;
     let end = start + pt2.ph_entry_size() as usize;
 
-    match header.pt1.class() {
-        Class::ThirtyTwo => {
-            let header: &'a ProgramHeader32 = read(&input[start..end]);
-            Ok(ProgramHeader::Ph32(header))
+    match (header.pt1.class(), header.pt1.data()) {
+        (Class::ThirtyTwo, Data::LittleEndian) => {
+            let header: &'a ProgramHeader32<P32Le> = read(&input[start..end]);
+            Ok(ProgramHeader::Ph32Le(header))
         }
-        Class::SixtyFour => {
-            let header: &'a ProgramHeader64 = read(&input[start..end]);
-            Ok(ProgramHeader::Ph64(header))
+        (Class::ThirtyTwo, Data::BigEndian) => {
+            let header: &'a ProgramHeader32<P32Be> = read(&input[start..end]);
+            Ok(ProgramHeader::Ph32Be(header))
         }
-        Class::None | Class::Other(_) => unreachable!(),
+        (Class::SixtyFour, Data::LittleEndian) => {
+            let header: &'a ProgramHeader64<P64Le> = read(&input[start..end]);
+            Ok(ProgramHeader::Ph64Le(header))
+        }
+        (Class::SixtyFour, Data::BigEndian) => {
+            let header: &'a ProgramHeader64<P64Be> = read(&input[start..end]);
+            Ok(ProgramHeader::Ph64Be(header))
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -52,86 +60,46 @@ impl<'b, 'a> Iterator for ProgramIter<'b, 'a> {
 
 #[derive(Copy, Clone, Debug)]
 pub enum ProgramHeader<'a> {
-    Ph32(&'a ProgramHeader32),
-    Ph64(&'a ProgramHeader64),
+    Ph32Le(&'a ProgramHeader32<P32Le>),
+    Ph32Be(&'a ProgramHeader32<P32Be>),
+    Ph64Le(&'a ProgramHeader64<P64Le>),
+    Ph64Be(&'a ProgramHeader64<P64Be>),
 }
 
 #[derive(Clone, Debug)]
 #[repr(C)]
-pub struct ProgramHeader32 {
-    type_: Type_,
-    offset: u32,
-    virtual_addr: u32,
-    physical_addr: u32,
-    file_size: u32,
-    mem_size: u32,
-    flags: u32,
-    align: u32,
+pub struct ProgramHeader32<P: Primitive> {
+    type_: Type_<P>,
+    offset: P::u32,
+    virtual_addr: P::u32,
+    physical_addr: P::u32,
+    file_size: P::u32,
+    mem_size: P::u32,
+    flags: P::u32,
+    align: P::u32,
 }
 
-unsafe impl Pod for ProgramHeader32 {}
+
+unsafe impl<P: Primitive> Pod for ProgramHeader32<P> {}
 
 #[derive(Clone, Debug)]
 #[repr(C)]
-pub struct ProgramHeader64 {
-    type_: Type_,
-    flags: u32,
-    offset: u64,
-    virtual_addr: u64,
-    physical_addr: u64,
-    file_size: u64,
-    mem_size: u64,
-    align: u64,
+pub struct ProgramHeader64<P: Primitive> {
+    type_: Type_<P>,
+    flags: P::u32,
+    offset: P::u64,
+    virtual_addr: P::u64,
+    physical_addr: P::u64,
+    file_size: P::u64,
+    mem_size: P::u64,
+    align: P::u64,
 }
 
-unsafe impl Pod for ProgramHeader64 {}
+unsafe impl<P: Primitive> Pod for ProgramHeader64<P> {}
 
-macro_rules! getter {
-    ($name: ident, $typ: ident) => {
-        pub fn $name(&self) -> $typ {
-            match *self {
-                ProgramHeader::Ph32(h) => h.$name as $typ,
-                ProgramHeader::Ph64(h) => h.$name as $typ,
-            }
-        }
-    }
-}
-
-impl<'a> ProgramHeader<'a> {
-    pub fn get_type(&self) -> Result<Type, &'static str> {
-        match *self {
-            ProgramHeader::Ph32(ph) => ph.get_type(),
-            ProgramHeader::Ph64(ph) => ph.get_type(),
-        }
-    }
-
-    pub fn get_data(&self, elf_file: &ElfFile<'a>) -> Result<SegmentData<'a>, &'static str> {
-        match *self {
-            ProgramHeader::Ph32(ph) => ph.get_data(elf_file),
-            ProgramHeader::Ph64(ph) => ph.get_data(elf_file),
-        }
-    }
-
-    getter!(align, u64);
-    getter!(file_size, u64);
-    getter!(mem_size, u64);
-    getter!(offset, u64);
-    getter!(physical_addr, u64);
-    getter!(virtual_addr, u64);
-    getter!(flags, u32);
-}
-
-impl<'a> fmt::Display for ProgramHeader<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            ProgramHeader::Ph32(ph) => ph.fmt(f),
-            ProgramHeader::Ph64(ph) => ph.fmt(f),
-        }
-    }
-}
 macro_rules! ph_impl {
     ($ph: ident) => {
-        impl $ph {
+        impl<P: Primitive> $ph<P> {
             pub fn get_type(&self) -> Result<Type, &'static str> {
                 self.type_.as_type()
             }
@@ -145,10 +113,12 @@ macro_rules! ph_impl {
                     }
                     Type::Dynamic => {
                         let data = self.raw_data(elf_file);
-                        match elf_file.header.pt1.class() {
-                            Class::ThirtyTwo => SegmentData::Dynamic32(read_array(data)),
-                            Class::SixtyFour => SegmentData::Dynamic64(read_array(data)),
-                            Class::None | Class::Other(_) => unreachable!(),
+                        match (elf_file.header.pt1.class(), elf_file.header.pt1.data()) {
+                            (Class::ThirtyTwo, Data::LittleEndian) => SegmentData::Dynamic32Le(read_array(data)),
+                            (Class::ThirtyTwo, Data::BigEndian) => SegmentData::Dynamic32Be(read_array(data)),
+                            (Class::SixtyFour, Data::LittleEndian) => SegmentData::Dynamic64Le(read_array(data)),
+                            (Class::SixtyFour, Data::BigEndian) => SegmentData::Dynamic64Be(read_array(data)),
+                            _ => unreachable!(),
                         }
                     }
                     Type::Note => {
@@ -168,11 +138,11 @@ macro_rules! ph_impl {
 
             pub fn raw_data<'a>(&self, elf_file: &ElfFile<'a>) -> &'a [u8] {
                 assert!(self.get_type().map(|typ| typ != Type::Null).unwrap_or(false));
-                &elf_file.input[self.offset as usize..(self.offset + self.file_size) as usize]
+                &elf_file.input[self.offset.to_native() as usize..(self.offset.to_native() + self.file_size.to_native()) as usize]
             }
         }
 
-        impl fmt::Display for $ph {
+        impl<P: Primitive> fmt::Display for $ph<P> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 try!(writeln!(f, "Program header:"));
                 try!(writeln!(f, "    type:             {:?}", self.get_type()));
@@ -192,8 +162,60 @@ macro_rules! ph_impl {
 ph_impl!(ProgramHeader32);
 ph_impl!(ProgramHeader64);
 
+macro_rules! getter {
+    ($name: ident, $typ: ident) => {
+        pub fn $name(&self) -> $typ {
+            match *self {
+                ProgramHeader::Ph32Le(h) => h.$name.to_native() as $typ,
+                ProgramHeader::Ph32Be(h) => h.$name.to_native() as $typ,
+                ProgramHeader::Ph64Le(h) => h.$name.to_native() as $typ,
+                ProgramHeader::Ph64Be(h) => h.$name.to_native() as $typ,
+            }
+        }
+    }
+}
+
+impl<'a> ProgramHeader<'a> {
+    pub fn get_type(&self) -> Result<Type, &'static str> {
+        match *self {
+            ProgramHeader::Ph32Le(ph) => ph.get_type(),
+            ProgramHeader::Ph32Be(ph) => ph.get_type(),
+            ProgramHeader::Ph64Le(ph) => ph.get_type(),
+            ProgramHeader::Ph64Be(ph) => ph.get_type(),
+        }
+    }
+
+    pub fn get_data(&self, elf_file: &ElfFile<'a>) -> Result<SegmentData<'a>, &'static str> {
+        match *self {
+            ProgramHeader::Ph32Le(ph) => ph.get_data(elf_file),
+            ProgramHeader::Ph32Be(ph) => ph.get_data(elf_file),
+            ProgramHeader::Ph64Le(ph) => ph.get_data(elf_file),
+            ProgramHeader::Ph64Be(ph) => ph.get_data(elf_file),
+        }
+    }
+
+    getter!(align, u64);
+    getter!(file_size, u64);
+    getter!(mem_size, u64);
+    getter!(offset, u64);
+    getter!(physical_addr, u64);
+    getter!(virtual_addr, u64);
+    getter!(flags, u32);
+}
+
+impl<'a> fmt::Display for ProgramHeader<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            ProgramHeader::Ph32Le(ph) => ph.fmt(f),
+            ProgramHeader::Ph32Be(ph) => ph.fmt(f),
+            ProgramHeader::Ph64Le(ph) => ph.fmt(f),
+            ProgramHeader::Ph64Be(ph) => ph.fmt(f),
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
-pub struct Type_(u32);
+pub struct Type_<P: Primitive>(P::u32);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Type {
@@ -209,9 +231,9 @@ pub enum Type {
     ProcessorSpecific(u32),
 }
 
-impl Type_ {
+impl<P: Primitive> Type_<P> {
     fn as_type(&self) -> Result<Type, &'static str> {
-        match self.0 {
+        match self.0.to_native() {
             0 => Ok(Type::Null),
             1 => Ok(Type::Load),
             2 => Ok(Type::Dynamic),
@@ -227,7 +249,7 @@ impl Type_ {
     }
 }
 
-impl fmt::Debug for Type_ {
+impl<P: Primitive> fmt::Debug for Type_<P> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.as_type().fmt(f)
     }
@@ -236,8 +258,10 @@ impl fmt::Debug for Type_ {
 pub enum SegmentData<'a> {
     Empty,
     Undefined(&'a [u8]),
-    Dynamic32(&'a [Dynamic<P32>]),
-    Dynamic64(&'a [Dynamic<P64>]),
+    Dynamic32Le(&'a [Dynamic<P32Le>]),
+    Dynamic32Be(&'a [Dynamic<P32Be>]),
+    Dynamic64Le(&'a [Dynamic<P64Le>]),
+    Dynamic64Be(&'a [Dynamic<P64Be>]),
     // Note32 uses 4-byte words, which I'm not sure how to manage.
     // The pointer is to the start of the name field in the note.
     Note64(&'a NoteHeader, &'a [u8]), /* TODO Interp and Phdr should probably be defined some how, but I can't find the details. */
@@ -257,30 +281,50 @@ pub const FLAG_MASKPROC: u32 = 0xf0000000;
 pub fn sanity_check<'a>(ph: ProgramHeader<'a>, elf_file: &ElfFile<'a>) -> Result<(), &'static str> {
     let header = elf_file.header;
     match ph {
-        ProgramHeader::Ph32(ph) => {
+        ProgramHeader::Ph32Le(ph) => {
             check!(mem::size_of_val(ph) == try!(header.pt2).ph_entry_size() as usize,
                    "program header size mismatch");
-            check!(((ph.offset + ph.file_size) as usize) < elf_file.input.len(),
+            check!(((ph.offset.to_native() + ph.file_size.to_native()) as usize) < elf_file.input.len(),
                    "entry point out of range");
             check!(try!(ph.get_type()) != Type::ShLib, "Shouldn't use ShLib");
-            if ph.align > 1 {
-                check!(ph.virtual_addr % ph.align == ph.offset % ph.align,
+            if ph.align.to_native() > 1 {
+                check!(ph.virtual_addr.to_native() % ph.align.to_native() == ph.offset.to_native() % ph.align.to_native(),
                        "Invalid combination of virtual_addr, offset, and align");
             }
-        }
-        ProgramHeader::Ph64(ph) => {
+        },
+        ProgramHeader::Ph32Be(ph) => {
             check!(mem::size_of_val(ph) == try!(header.pt2).ph_entry_size() as usize,
                    "program header size mismatch");
-            check!(((ph.offset + ph.file_size) as usize) < elf_file.input.len(),
+            check!(((ph.offset.to_native() + ph.file_size.to_native()) as usize) < elf_file.input.len(),
                    "entry point out of range");
             check!(try!(ph.get_type()) != Type::ShLib, "Shouldn't use ShLib");
-            if ph.align > 1 {
-                // println!("{} {} {}", ph.virtual_addr, ph.offset, ph.align);
-                check!(ph.virtual_addr % ph.align == ph.offset % ph.align,
+            if ph.align.to_native() > 1 {
+                check!(ph.virtual_addr.to_native() % ph.align.to_native() == ph.offset.to_native() % ph.align.to_native(),
+                       "Invalid combination of virtual_addr, offset, and align");
+            }
+        },
+        ProgramHeader::Ph64Le(ph) => {
+            check!(mem::size_of_val(ph) == try!(header.pt2).ph_entry_size() as usize,
+                   "program header size mismatch");
+            check!(((ph.offset.to_native() + ph.file_size.to_native()) as usize) < elf_file.input.len(),
+                   "entry point out of range");
+            check!(try!(ph.get_type()) != Type::ShLib, "Shouldn't use ShLib");
+            if ph.align.to_native() > 1 {
+                check!(ph.virtual_addr.to_native() % ph.align.to_native() == ph.offset.to_native() % ph.align.to_native(),
+                       "Invalid combination of virtual_addr, offset, and align");
+            }
+        },
+        ProgramHeader::Ph64Be(ph) => {
+            check!(mem::size_of_val(ph) == try!(header.pt2).ph_entry_size() as usize,
+                   "program header size mismatch");
+            check!(((ph.offset.to_native() + ph.file_size.to_native()) as usize) < elf_file.input.len(),
+                   "entry point out of range");
+            check!(try!(ph.get_type()) != Type::ShLib, "Shouldn't use ShLib");
+            if ph.align.to_native() > 1 {
+                check!(ph.virtual_addr.to_native() % ph.align.to_native() == ph.offset.to_native() % ph.align.to_native(),
                        "Invalid combination of virtual_addr, offset, and align");
             }
         }
     }
-
     Ok(())
 }

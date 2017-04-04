@@ -1,20 +1,20 @@
 use core::fmt;
-use {P32, P64};
+use {P32Le, P64Le, P32Be, P64Be, ToNative, Primitive};
 use zero::Pod;
 
 #[repr(C)]
-pub struct Dynamic<P> {
+pub struct Dynamic<P: Primitive> {
     tag: Tag_<P>,
-    un: P,
+    un: P::P,
 }
 
-unsafe impl<P> Pod for Dynamic<P> {}
+unsafe impl<P: Primitive> Pod for Dynamic<P> {}
 
 #[derive(Copy, Clone)]
-pub struct Tag_<P>(P);
+pub struct Tag_<P: Primitive>(P::P);
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Tag<P> {
+pub enum Tag<P: Primitive> {
     Null,
     Needed,
     PltRelSize,
@@ -49,8 +49,8 @@ pub enum Tag<P> {
     PreInitArray,
     PreInitArraySize,
     SymTabShIndex,
-    OsSpecific(P),
-    ProcessorSpecific(P),
+    OsSpecific(P::P),
+    ProcessorSpecific(P::P),
 }
 
 macro_rules! impls {
@@ -60,7 +60,7 @@ macro_rules! impls {
                 self.tag.as_tag()
             }
 
-            pub fn get_val(&self) -> Result<$p, &'static str> {
+            pub fn get_val(&self) -> Result<<$p as Primitive>::P, &'static str> {
                 match try!(self.get_tag()) {
                     Tag::Needed | Tag::PltRelSize | Tag::RelaSize | Tag::RelaEnt | Tag::StrSize |
                     Tag::SymEnt | Tag::SoName | Tag::RPath | Tag::RelSize | Tag::RelEnt | Tag::PltRel |
@@ -70,7 +70,7 @@ macro_rules! impls {
                 }
             }
 
-            pub fn get_ptr(&self) -> Result<$p, &'static str> {
+            pub fn get_ptr(&self) -> Result<<$p as Primitive>::P, &'static str> {
                 match try!(self.get_tag()) {
                     Tag::Pltgot | Tag::Hash | Tag::StrTab | Tag::SymTab | Tag::Rela | Tag::Init | Tag::Fini |
                     Tag::Rel | Tag::Debug | Tag::JmpRel | Tag::InitArray | Tag::FiniArray |
@@ -82,8 +82,8 @@ macro_rules! impls {
         }
 
         impl Tag_<$p> {
-            fn as_tag(self) -> Result<Tag<$p>, &'static str> {
-                match self.0 {
+            fn as_tag(&self) -> Result<Tag<$p>, &'static str> {
+                match self.0.to_native() {
                     0 => Ok(Tag::Null),
                     1 => Ok(Tag::Needed),
                     2 => Ok(Tag::PltRelSize),
@@ -118,8 +118,8 @@ macro_rules! impls {
                     32 => Ok(Tag::PreInitArray),
                     33 => Ok(Tag::PreInitArraySize),
                     34 => Ok(Tag::SymTabShIndex),
-                    t if t >= 0x6000000D && t <= 0x6fffffff => Ok(Tag::OsSpecific(t)),
-                    t if t >= 0x70000000 && t <= 0x7fffffff => Ok(Tag::ProcessorSpecific(t)),
+                    t if t >= 0x6000000D && t <= 0x6fffffff => Ok(Tag::OsSpecific(self.0)),
+                    t if t >= 0x70000000 && t <= 0x7fffffff => Ok(Tag::ProcessorSpecific(self.0)),
                     _ => Err("Invalid tag value"),
                 }
             }
@@ -133,5 +133,7 @@ macro_rules! impls {
     }
 }
 
-impls!(P32);
-impls!(P64);
+impls!(P32Le);
+impls!(P32Be);
+impls!(P64Le);
+impls!(P64Be);

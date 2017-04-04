@@ -2,8 +2,8 @@ use core::fmt;
 use core::mem;
 use core::slice;
 
-use {P32, P64, ElfFile};
-use header::{Header, Class};
+use {P32Le, P64Le, P32Be, P64Be, ToNative, Native, Primitive, ElfFile, U32Le, U32Be, U64Le, U64Be};
+use header::{Header, Class, Data};
 use zero::{read, read_array, read_str, read_strs_to_null, StrReaderIterator, Pod};
 use symbol_table;
 use dynamic::Dynamic;
@@ -21,16 +21,24 @@ pub fn parse_section_header<'a>(input: &'a [u8],
         let start = (index as u64 * pt2.sh_entry_size() as u64 + pt2.sh_offset() as u64) as usize;
         let end = start + pt2.sh_entry_size() as usize;
 
-        match header.pt1.class() {
-            Class::ThirtyTwo => {
-                let header: &'a SectionHeader_<P32> = read(&input[start..end]);
-                SectionHeader::Sh32(header)
+        match (header.pt1.class(), header.pt1.data()) {
+            (Class::ThirtyTwo, Data::LittleEndian) => {
+                let header: &'a SectionHeader_<P32Le> = read(&input[start..end]);
+                SectionHeader::Sh32Le(header)
             }
-            Class::SixtyFour => {
-                let header: &'a SectionHeader_<P64> = read(&input[start..end]);
-                SectionHeader::Sh64(header)
+            (Class::ThirtyTwo, Data::BigEndian) => {
+                let header: &'a SectionHeader_<P32Be> = read(&input[start..end]);
+                SectionHeader::Sh32Be(header)
             }
-            Class::None | Class::Other(_) => unreachable!(),
+            (Class::SixtyFour, Data::LittleEndian) => {
+                let header: &'a SectionHeader_<P64Le> = read(&input[start..end]);
+                SectionHeader::Sh64Le(header)
+            }
+            (Class::SixtyFour, Data::BigEndian) => {
+                let header: &'a SectionHeader_<P64Be> = read(&input[start..end]);
+                SectionHeader::Sh64Be(header)
+            }
+            _ => unreachable!(),
         }
     })
 }
@@ -69,16 +77,20 @@ pub const SHN_HIRESERVE: u16 = 0xffff;
 
 #[derive(Clone, Copy)]
 pub enum SectionHeader<'a> {
-    Sh32(&'a SectionHeader_<P32>),
-    Sh64(&'a SectionHeader_<P64>),
+    Sh32Le(&'a SectionHeader_<P32Le>),
+    Sh32Be(&'a SectionHeader_<P32Be>),
+    Sh64Le(&'a SectionHeader_<P64Le>),
+    Sh64Be(&'a SectionHeader_<P64Be>),
 }
 
 macro_rules! getter {
     ($name: ident, $typ: ident) => {
         pub fn $name(&self) -> $typ {
             match *self {
-                SectionHeader::Sh32(h) => h.$name as $typ,
-                SectionHeader::Sh64(h) => h.$name as $typ,
+                SectionHeader::Sh32Le(h) => h.$name.to_native() as $typ,
+                SectionHeader::Sh32Be(h) => h.$name.to_native() as $typ,
+                SectionHeader::Sh64Le(h) => h.$name.to_native() as $typ,
+                SectionHeader::Sh64Be(h) => h.$name.to_native() as $typ,
             }
         }
     }
@@ -99,12 +111,14 @@ impl<'a> SectionHeader<'a> {
 
     pub fn get_data(&self, elf_file: &ElfFile<'a>) -> Result<SectionData<'a>, &'static str> {
         macro_rules! array_data {
-            ($data32: ident, $data64: ident) => {{
+            ($data32le: ident, $data32be: ident, $data64le: ident, $data64be: ident) => {{
                 let data = self.raw_data(elf_file);
-                match elf_file.header.pt1.class() {
-                    Class::ThirtyTwo => SectionData::$data32(read_array(data)),
-                    Class::SixtyFour => SectionData::$data64(read_array(data)),
-                    Class::None | Class::Other(_) => unreachable!(),
+                match (elf_file.header.pt1.class(), elf_file.header.pt1.data()) {
+                    (Class::ThirtyTwo, Data::LittleEndian) => SectionData::$data32le(read_array(data)),
+                    (Class::ThirtyTwo, Data::BigEndian) => SectionData::$data32be(read_array(data)),
+                    (Class::SixtyFour, Data::LittleEndian) => SectionData::$data64le(read_array(data)),
+                    (Class::SixtyFour, Data::BigEndian) => SectionData::$data64be(read_array(data)),
+                    _ => unreachable!(),
                 }
             }}
         }
@@ -116,15 +130,15 @@ impl<'a> SectionHeader<'a> {
             ShType::OsSpecific(_) |
             ShType::ProcessorSpecific(_) |
             ShType::User(_) => SectionData::Undefined(self.raw_data(elf_file)),
-            ShType::SymTab => array_data!(SymbolTable32, SymbolTable64),
-            ShType::DynSym => array_data!(DynSymbolTable32, DynSymbolTable64),
+            ShType::SymTab => array_data!(SymbolTable32Le, SymbolTable32Be, SymbolTable64Le, SymbolTable64Be),
+            ShType::DynSym => array_data!(DynSymbolTable32Le, DynSymbolTable32Be, DynSymbolTable64Le, DynSymbolTable64Be),
             ShType::StrTab => SectionData::StrArray(self.raw_data(elf_file)),
             ShType::InitArray | ShType::FiniArray | ShType::PreInitArray => {
-                array_data!(FnArray32, FnArray64)
+                array_data!(FnArray32Le, FnArray32Be, FnArray64Le, FnArray32Be)
             }
-            ShType::Rela => array_data!(Rela32, Rela64),
-            ShType::Rel => array_data!(Rel32, Rel64),
-            ShType::Dynamic => array_data!(Dynamic32, Dynamic64),
+            ShType::Rela => array_data!(Rela32Le, Rela32Be, Rela64Le, Rela64Be),
+            ShType::Rel => array_data!(Rel32Le, Rel32Be, Rel64Le, Rel64Be),
+            ShType::Dynamic => array_data!(Dynamic32Le, Dynamic32Be, Dynamic64Le, Dynamic64Be),
             ShType::Group => {
                 let data = self.raw_data(elf_file);
                 unsafe {
@@ -190,31 +204,40 @@ impl<'a> fmt::Display for SectionHeader<'a> {
         }
 
         match *self {
-            SectionHeader::Sh32(sh) => sh_display!(sh),
-            SectionHeader::Sh64(sh) => sh_display!(sh),
+            SectionHeader::Sh32Le(sh) => sh_display!(sh),
+            SectionHeader::Sh32Be(sh) => sh_display!(sh),
+            SectionHeader::Sh64Le(sh) => sh_display!(sh),
+            SectionHeader::Sh64Be(sh) => sh_display!(sh),
         }
     }
 }
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct SectionHeader_<P> {
-    name: u32,
-    type_: ShType_,
-    flags: P,
-    address: P,
-    offset: P,
-    size: P,
-    link: u32,
-    info: u32,
-    align: P,
-    entry_size: P,
+pub struct SectionHeader_<P: Primitive> {
+    name: P::u32,
+    type_: ShType_<P>,
+    flags: P::P,
+    address: P::P,
+    offset: P::P,
+    size: P::P,
+    link: P::u32,
+    info: P::u32,
+    align: P::P,
+    entry_size: P::P,
 }
 
-unsafe impl<P> Pod for SectionHeader_<P> {}
+unsafe impl<P: Primitive> Pod for SectionHeader_<P> {}
 
 #[derive(Copy, Clone)]
-pub struct ShType_(u32);
+pub struct ShType_<P: Primitive = Native>(P::u32);
+
+impl<P: Primitive> ToNative for ShType_<P> {
+    type Native = ShType_<Native>;
+    fn to_native(&self) -> Self::Native {
+        ShType_(self.0.to_native())
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ShType {
@@ -240,9 +263,9 @@ pub enum ShType {
     User(u32),
 }
 
-impl ShType_ {
-    fn as_sh_type(self) -> Result<ShType, &'static str> {
-        match self.0 {
+impl<P: Primitive> ShType_<P> {
+    fn as_sh_type(&self) -> Result<ShType, &'static str> {
+        match self.0.to_native() {
             0 => Ok(ShType::Null),
             1 => Ok(ShType::ProgBits),
             2 => Ok(ShType::SymTab),
@@ -269,7 +292,7 @@ impl ShType_ {
     }
 }
 
-impl fmt::Debug for ShType_ {
+impl<P: Primitive> fmt::Debug for ShType_<P> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.as_sh_type().fmt(f)
     }
@@ -283,22 +306,34 @@ pub enum SectionData<'a> {
         indicies: &'a [u32],
     },
     StrArray(&'a [u8]),
-    FnArray32(&'a [u32]),
-    FnArray64(&'a [u64]),
-    SymbolTable32(&'a [symbol_table::Entry32]),
-    SymbolTable64(&'a [symbol_table::Entry64]),
-    DynSymbolTable32(&'a [symbol_table::DynEntry32]),
-    DynSymbolTable64(&'a [symbol_table::DynEntry64]),
+    FnArray32Le(&'a [U32Le]),
+    FnArray32Be(&'a [U32Be]),
+    FnArray64Le(&'a [U64Le]),
+    FnArray64Be(&'a [U64Be]),
+    SymbolTable32Le(&'a [symbol_table::Entry32<P32Le>]),
+    SymbolTable32Be(&'a [symbol_table::Entry32<P32Be>]),
+    SymbolTable64Le(&'a [symbol_table::Entry64<P64Le>]),
+    SymbolTable64Be(&'a [symbol_table::Entry64<P64Be>]),
+    DynSymbolTable32Le(&'a [symbol_table::DynEntry32<P32Le>]),
+    DynSymbolTable32Be(&'a [symbol_table::DynEntry32<P32Be>]),
+    DynSymbolTable64Le(&'a [symbol_table::DynEntry64<P64Le>]),
+    DynSymbolTable64Be(&'a [symbol_table::DynEntry64<P64Be>]),
     SymTabShIndex(&'a [u32]),
     // Note32 uses 4-byte words, which I'm not sure how to manage.
     // The pointer is to the start of the name field in the note.
     Note64(&'a NoteHeader, &'a [u8]),
-    Rela32(&'a [Rela<P32>]),
-    Rela64(&'a [Rela<P64>]),
-    Rel32(&'a [Rel<P32>]),
-    Rel64(&'a [Rel<P64>]),
-    Dynamic32(&'a [Dynamic<P64>]),
-    Dynamic64(&'a [Dynamic<P32>]),
+    Rela32Le(&'a [Rela<P32Le>]),
+    Rela32Be(&'a [Rela<P32Be>]),
+    Rela64Le(&'a [Rela<P64Le>]),
+    Rela64Be(&'a [Rela<P64Be>]),
+    Rel32Le(&'a [Rel<P32Le>]),
+    Rel32Be(&'a [Rel<P32Be>]),
+    Rel64Le(&'a [Rel<P64Le>]),
+    Rel64Be(&'a [Rel<P64Be>]),
+    Dynamic32Le(&'a [Dynamic<P32Le>]),
+    Dynamic32Be(&'a [Dynamic<P32Be>]),
+    Dynamic64Le(&'a [Dynamic<P64Le>]),
+    Dynamic64Be(&'a [Dynamic<P64Be>]),
     HashTable(&'a HashTable),
 }
 
@@ -407,70 +442,127 @@ pub const GRP_MASKPROC: u64 = 0xf0000000;
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct Rela<P> {
-    offset: P,
-    info: P,
-    addend: P,
+pub struct Rela<P: Primitive> {
+    offset: P::P,
+    info: P::P,
+    addend: P::P,
 }
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct Rel<P> {
-    offset: P,
-    info: P,
+pub struct Rel<P: Primitive> {
+    offset: P::P,
+    info: P::P,
 }
 
-unsafe impl<P> Pod for Rela<P> {}
-unsafe impl<P> Pod for Rel<P> {}
+unsafe impl<P: Primitive> Pod for Rela<P> {}
+unsafe impl<P: Primitive> Pod for Rel<P> {}
 
-impl Rela<P32> {
+impl Rela<P32Le> {
     pub fn get_offset(&self) -> u32 {
-        self.offset
+        self.offset.to_native()
     }
     pub fn get_addend(&self) -> u32 {
-        self.addend
+        self.addend.to_native()
     }
     pub fn get_symbol_table_index(&self) -> u32 {
-        self.info >> 8
+        self.info.to_native() >> 8
     }
     pub fn get_type(&self) -> u8 {
-        self.info as u8
+        self.info.to_native() as u8
     }
 }
-impl Rela<P64> {
+
+impl Rela<P32Be> {
+    pub fn get_offset(&self) -> u32 {
+        self.offset.to_native()
+    }
+    pub fn get_addend(&self) -> u32 {
+        self.addend.to_native()
+    }
+    pub fn get_symbol_table_index(&self) -> u32 {
+        self.info.to_native() >> 8
+    }
+    pub fn get_type(&self) -> u8 {
+        self.info.to_native() as u8
+    }
+}
+
+impl Rela<P64Le> {
     pub fn get_offset(&self) -> u64 {
-        self.offset
+        self.offset.to_native()
     }
     pub fn get_addend(&self) -> u64 {
-        self.addend
+        self.addend.to_native()
     }
     pub fn get_symbol_table_index(&self) -> u32 {
-        (self.info >> 32) as u32
+        (self.info.to_native() >> 32) as u32
     }
     pub fn get_type(&self) -> u32 {
-        (self.info & 0xffffffff) as u32
+        (self.info.to_native() & 0xffffffff) as u32
     }
 }
-impl Rel<P32> {
-    pub fn get_offset(&self) -> u32 {
-        self.offset
+
+impl Rela<P64Be> {
+    pub fn get_offset(&self) -> u64 {
+        self.offset.to_native()
+    }
+    pub fn get_addend(&self) -> u64 {
+        self.addend.to_native()
     }
     pub fn get_symbol_table_index(&self) -> u32 {
-        self.info >> 8
+        (self.info.to_native() >> 32) as u32
+    }
+    pub fn get_type(&self) -> u32 {
+        (self.info.to_native() & 0xffffffff) as u32
+    }
+}
+
+impl Rel<P32Le> {
+    pub fn get_offset(&self) -> u32 {
+        self.offset.to_native()
+    }
+    pub fn get_symbol_table_index(&self) -> u32 {
+        self.info.to_native() >> 8
     }
     pub fn get_type(&self) -> u8 {
-        self.info as u8
+        self.info.to_native() as u8
     }
 }
-impl Rel<P64> {
-    pub fn get_offset(&self) -> u64 {
-        self.offset
+
+impl Rel<P32Be> {
+    pub fn get_offset(&self) -> u32 {
+        self.offset.to_native()
     }
     pub fn get_symbol_table_index(&self) -> u32 {
-        (self.info >> 32) as u32
+        self.info.to_native() >> 8
+    }
+    pub fn get_type(&self) -> u8 {
+        self.info.to_native() as u8
+    }
+}
+
+impl Rel<P64Le> {
+    pub fn get_offset(&self) -> u64 {
+        self.offset.to_native()
+    }
+    pub fn get_symbol_table_index(&self) -> u32 {
+        (self.info.to_native() >> 32) as u32
     }
     pub fn get_type(&self) -> u32 {
-        (self.info & 0xffffffff) as u32
+        (self.info.to_native() & 0xffffffff) as u32
+    }
+}
+
+impl Rel<P64Be> {
+    pub fn get_offset(&self) -> u64 {
+        self.offset.to_native()
+    }
+    pub fn get_symbol_table_index(&self) -> u32 {
+        (self.info.to_native() >> 32) as u32
+    }
+    pub fn get_type(&self) -> u32 {
+        (self.info.to_native() & 0xffffffff) as u32
     }
 }
 
@@ -506,7 +598,7 @@ impl NoteHeader {
     }
 }
 
-pub fn sanity_check<'a>(header: SectionHeader<'a>, file: &ElfFile<'a>) -> Result<(), &'static str> {
+pub fn sanity_check<'a>(header: SectionHeader<'a>, _file: &ElfFile<'a>) -> Result<(), &'static str> {
     if try!(header.get_type()) == ShType::Null {
         return Ok(());
     }
